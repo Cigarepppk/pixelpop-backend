@@ -45,12 +45,20 @@ app.post("/signup", async (req, res) => {
     if (!username || !password) {
       return res.status(400).json({ error: "Username and password are required." });
     }
+
+    // Check if the user already exists
+    const existingUser = await User.findOne({ username });
+    if (existingUser) {
+      // Return 409 Conflict if the username is already taken
+      return res.status(409).json({ error: "User already exists." });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     await User.create({ username, password: hashedPassword });
     res.status(201).json({ message: "User created successfully!" });
   } catch (err) {
-    // This will catch the duplicate key error if the username already exists
-    res.status(400).json({ error: "User already exists!" });
+    // This is a catch-all for other server-side errors
+    res.status(500).json({ error: "An unexpected error occurred." });
   }
 });
 
@@ -64,15 +72,16 @@ app.post("/login", async (req, res) => {
     const user = await User.findOne({ username });
 
     if (!user) {
-      return res.status(400).json({ error: "User not found" });
+      // User not found, return 401 Unauthorized
+      return res.status(401).json({ error: "Invalid username or password" });
     }
 
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
-      return res.status(400).json({ error: "Invalid password" });
+      // Invalid password, return 401 Unauthorized
+      return res.status(401).json({ error: "Invalid username or password" });
     }
 
-    // You should use a strong, secret key for JWT_SECRET in production
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET || "secret123", { expiresIn: "1h" });
     res.json({ message: "Login successful", token });
   } catch (err) {
