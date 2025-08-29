@@ -1,4 +1,4 @@
-/*require('dotenv').config(); // 👈 ADD THIS LINE
+require('dotenv').config(); // 👈 ADD THIS LINE
 
 const express = require("express");
 const mongoose = require("mongoose");
@@ -105,7 +105,9 @@ app.get("/profile", (req, res) => {
 
 // 🔹 Start Server
 app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
-*/
+
+
+/*
 require("dotenv").config();
 
 const express = require("express");
@@ -194,4 +196,4 @@ app.get("/profile", (req, res) => {
 });
 
 // Start Server
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));*/
