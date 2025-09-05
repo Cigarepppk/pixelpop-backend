@@ -1371,6 +1371,84 @@ app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// GET /reset-password → simple page to submit new password from emailed link
+app.get('/reset-password', (req, res) => {
+  res.type('html').send(`
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Reset Password</title>
+        <style>
+          body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px;background:#fafafa}
+          .card{max-width:420px;margin:40px auto;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.06);padding:20px}
+          h2{margin:0 0 10px 0}
+          p{color:#555}
+          form{display:grid;gap:12px;margin-top:10px}
+          input,button{padding:12px;border-radius:10px;border:1px solid #ddd;font-size:16px}
+          button{border:none;background:#111;color:#fff;font-weight:700;cursor:pointer}
+          .msg{margin-top:10px;color:#d00}
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>Reset your password</h2>
+          <p>Enter a new password for your account.</p>
+          <form id="reset-form">
+            <input type="password" name="password" placeholder="New password" required />
+            <input type="password" name="confirm" placeholder="Confirm new password" required />
+            <button type="submit">Update Password</button>
+            <div class="msg" id="msg"></div>
+          </form>
+        </div>
+
+        <script>
+          const params = new URLSearchParams(location.search);
+          const token = params.get('token');
+          const email = params.get('email');
+          const msgEl = document.getElementById('msg');
+
+          if (!token || !email) {
+            msgEl.textContent = 'Invalid or incomplete reset link.';
+          }
+
+          document.getElementById('reset-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.currentTarget);
+            const password = fd.get('password');
+            const confirm = fd.get('confirm');
+            if (password !== confirm) {
+              msgEl.textContent = 'Passwords do not match.';
+              return;
+            }
+            msgEl.textContent = '';
+            try {
+              const res = await fetch('/reset-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, token, newPassword: password })
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) {
+                msgEl.textContent = data.error || 'Could not reset password.';
+                return;
+              }
+              alert('Password updated! You can now log in.');
+              // Redirect to your main page or login
+              location.href = '/';
+            } catch (err) {
+              console.error(err);
+              msgEl.textContent = 'Network error. Please try again.';
+            }
+          });
+        </script>
+      </body>
+    </html>
+  `);
+});
+
+
 /* ────────────────────────────────────────────────────────────
    Start server
    ──────────────────────────────────────────────────────────── */
