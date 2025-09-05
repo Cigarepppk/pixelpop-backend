@@ -770,7 +770,7 @@ app.listen(PORT, () => {
 });
 */
 
-require('dotenv').config(); // Loads: MONGODB_URI, MONGODB_DB, JWT_SECRET, PUBLIC_BASE_URL, PORT, CORS_ORIGINS, NODE_ENV, SMTP_*, MAIL_FROM, GOOGLE_CLIENT_ID
+require('dotenv').config(); // Loads: MONGODB_URI, MONGODB_DB, JWT_SECRET, PUBLIC_BASE_URL, PORT, CORS_ORIGINS, NODE_ENV, SMTP_*, MAIL_FROM, GOOGLE_CLIENT_ID, DEBUG_RESET
 
 const express = require('express');
 const mongoose = require('mongoose');
@@ -850,6 +850,11 @@ function getBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
+// Normalize emails to avoid case-mismatch issues
+function normalizeEmail(e) {
+  return (e || '').trim().toLowerCase();
+}
+
 /* ────────────────────────────────────────────────────────────
    Mailer (for forgot/reset password)
    ──────────────────────────────────────────────────────────── */
@@ -922,7 +927,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/', (_req, res) => res.send('Backend server is running!'));
 
 /* ────────────────────────────────────────────────────────────
-   Auth endpoints (signup / login) — now supports email OR username login
+   Auth endpoints (signup / login) — supports email OR username login
    ──────────────────────────────────────────────────────────── */
 app.post('/signup', async (req, res) => {
   try {
@@ -930,12 +935,10 @@ app.post('/signup', async (req, res) => {
     if (!username || !email || !password) {
       return res.status(400).json({ error: 'Username, email, and password are required.' });
     }
+    const normalizedEmail = normalizeEmail(email);
     const hashed = await bcrypt.hash(password, 10);
-    const user = new User({ username, email, password: hashed });
+    const user = new User({ username, email: normalizedEmail, password: hashed });
     await user.save();
-    // (Optional) auto-issue JWT on signup:
-    // const token = jwt.sign({ id: user._id, username: user.username, email: user.email }, process.env.JWT_SECRET || 'secret123', { expiresIn: '1h' });
-    // return res.status(201).json({ message: 'User registered successfully!', token, username: user.username, email: user.email });
     res.status(201).json({ message: 'User registered successfully!' });
   } catch (err) {
     if (err.code === 11000) {
@@ -950,13 +953,13 @@ app.post('/signup', async (req, res) => {
 
 app.post('/login', async (req, res) => {
   try {
-    // Support { email, password } OR { username, password }
     const { email, username, password } = req.body || {};
     if (!password || (!email && !username)) {
       return res.status(400).json({ error: 'Email or username, and password are required.' });
     }
 
-    const query = email ? { email } : { username };
+    const normalizedEmail = email ? normalizeEmail(email) : null;
+    const query = normalizedEmail ? { email: normalizedEmail } : { username };
     const user = await User.findOne(query);
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
 
@@ -983,13 +986,13 @@ app.get('/api/auth/verify', authMiddleware, (req, res) => {
 /* ────────────────────────────────────────────────────────────
    Forgot Password + Reset Password
    ──────────────────────────────────────────────────────────── */
-// POST /forgot-password  { email }
 app.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body || {};
     if (!email) return res.status(400).json({ error: 'Email is required.' });
 
-    const user = await User.findOne({ email });
+    const normalizedEmail = normalizeEmail(email);
+    const user = await User.findOne({ email: normalizedEmail });
     // Always return 200 to prevent user enumeration
     if (!user) return res.json({ message: 'If that account exists, an email was sent.' });
 
@@ -1000,10 +1003,14 @@ app.post('/forgot-password', async (req, res) => {
     user.passwordResetExpires = expires;
     await user.save();
 
-    const base = process.env.PUBLIC_BASE_URL || getBaseUrl(req);
-    const link = `${base}/reset-password?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`;
+    if (process.env.DEBUG_RESET === '1') {
+      console.log('[forgot-password] email=%s token=%s exp=%s', normalizedEmail, token, expires.toISOString());
+    }
 
-    await sendMail(email, 'Reset your PixelPop password', `
+    const base = process.env.PUBLIC_BASE_URL || getBaseUrl(req);
+    const link = `${base}/reset-password?token=${encodeURIComponent(token)}&email=${encodeURIComponent(normalizedEmail)}`;
+
+    await sendMail(normalizedEmail, 'Reset your PixelPop password', `
       <p>We received a request to reset your password.</p>
       <p><a href="${link}">Click here to reset</a> (valid for 30 minutes).</p>
       <p>If you didn’t request this, you can ignore this email.</p>
@@ -1016,7 +1023,6 @@ app.post('/forgot-password', async (req, res) => {
   }
 });
 
-// POST /reset-password  { email, token, newPassword }
 app.post('/reset-password', async (req, res) => {
   try {
     const { email, token, newPassword } = req.body || {};
@@ -1024,12 +1030,25 @@ app.post('/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Email, token and newPassword are required.' });
     }
 
+    const normalizedEmail = normalizeEmail(email);
+
+    if (process.env.DEBUG_RESET === '1') {
+      console.log('[reset-password] email=%s token=%s', normalizedEmail, token);
+    }
+
     const user = await User.findOne({
-      email,
+      email: normalizedEmail,
       passwordResetToken: token,
       passwordResetExpires: { $gt: new Date() },
     });
-    if (!user) return res.status(400).json({ error: 'Invalid or expired reset token.' });
+
+    if (!user) {
+      if (process.env.DEBUG_RESET === '1') {
+        const anyByToken = await User.findOne({ passwordResetToken: token });
+        console.log('[reset-password] lookup failed. anyByToken?', !!anyByToken);
+      }
+      return res.status(400).json({ error: 'Invalid or expired reset token.' });
+    }
 
     const hashed = await bcrypt.hash(newPassword, 10);
     user.password = hashed;
@@ -1044,24 +1063,103 @@ app.post('/reset-password', async (req, res) => {
   }
 });
 
+// GET /reset-password → simple page to submit new password from emailed link
+app.get('/reset-password', (req, res) => {
+  res.type('html').send(`
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Reset Password</title>
+        <style>
+          body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px;background:#fafafa}
+          .card{max-width:420px;margin:40px auto;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.06);padding:20px}
+          h2{margin:0 0 10px 0}
+          p{color:#555}
+          form{display:grid;gap:12px;margin-top:10px}
+          input,button{padding:12px;border-radius:10px;border:1px solid #ddd;font-size:16px}
+          button{border:none;background:#111;color:#fff;font-weight:700;cursor:pointer}
+          .msg{margin-top:10px;color:#d00}
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>Reset your password</h2>
+          <p>Enter a new password for your account.</p>
+          <form id="reset-form">
+            <input type="password" name="password" placeholder="New password" required />
+            <input type="password" name="confirm" placeholder="Confirm new password" required />
+            <button type="submit">Update Password</button>
+            <div class="msg" id="msg"></div>
+          </form>
+        </div>
+
+        <script>
+          const params = new URLSearchParams(location.search);
+          const token = params.get('token');
+          const email = params.get('email');
+          const msgEl = document.getElementById('msg');
+
+          if (!token || !email) {
+            msgEl.textContent = 'Invalid or incomplete reset link.';
+          }
+
+          document.getElementById('reset-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.currentTarget);
+            const password = fd.get('password');
+            const confirm = fd.get('confirm');
+            if (password !== confirm) {
+              msgEl.textContent = 'Passwords do not match.';
+              return;
+            }
+            msgEl.textContent = '';
+            try {
+              const res = await fetch('/reset-password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, token, newPassword: password })
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) {
+                msgEl.textContent = data.error || 'Could not reset password.';
+                return;
+              }
+              alert('Password updated! You can now log in.');
+              location.href = '/';
+            } catch (err) {
+              console.error(err);
+              msgEl.textContent = 'Network error. Please try again.';
+            }
+          });
+        </script>
+      </body>
+    </html>
+  `);
+});
+
 /* ────────────────────────────────────────────────────────────
    Google Sign‑In → verify ID token, upsert user, return our JWT
    ──────────────────────────────────────────────────────────── */
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 async function createUserFromGoogle(name, email, googleId) {
-  const base = (name || email.split('@')[0] || 'user')
+  const base = (name || (email || '').split('@')[0] || 'user')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '')
     .slice(0, 20) || 'user';
-  let candidate = base || 'user';
+
+  let candidate = base;
   for (let i = 0; i < 5; i++) {
     const exists = await User.exists({ username: candidate });
     if (!exists) break;
     candidate = `${base}${Math.floor(Math.random() * 10000)}`;
   }
+
+  const normalizedEmail = normalizeEmail(email);
   const placeholder = await bcrypt.hash(uuidv4(), 10);
-  return User.create({ username: candidate, email, password: placeholder, googleId });
+  return User.create({ username: candidate, email: normalizedEmail, password: placeholder, googleId });
 }
 
 // POST /auth/google  { idToken }
@@ -1074,11 +1172,13 @@ app.post('/auth/google', async (req, res) => {
     const ticket = await googleClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
     const payload = ticket.getPayload();
     const { sub: googleId, email, name } = payload || {};
-    if (!email) return res.status(400).json({ error: 'Google account has no email.' });
+    const normalizedEmail = email ? normalizeEmail(email) : null;
 
-    let user = await User.findOne({ email });
+    if (!normalizedEmail) return res.status(400).json({ error: 'Google account has no email.' });
+
+    let user = await User.findOne({ email: normalizedEmail });
     if (!user) {
-      user = await createUserFromGoogle(name, email, googleId);
+      user = await createUserFromGoogle(name, normalizedEmail, googleId);
     } else if (!user.googleId) {
       user.googleId = googleId;
       await user.save();
@@ -1155,7 +1255,7 @@ app.get('/i/:id', async (req, res) => {
 
     // Get file doc to set headers
     const filesCol = mongoose.connection.db.collection('photos.files');
-    const doc = await filesCol.findOne({ _id: id });
+    const doc = await filesCol.findOne({ _: id });
     if (!doc) return res.status(404).send('Not found');
 
     const type = doc.contentType || doc.metadata?.contentType || 'image/jpeg';
@@ -1352,6 +1452,7 @@ app.get('/api/gallery/mine', authMiddleware, async (req, res) => {
 // Returns 200 + { ok:true } on success
 app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
   try {
+    if (!gridfsBucket) return res.status(503).json({ error: 'Storage not ready' });
     const _id = new ObjectId(req.params.id);
     const doc = await GalleryItem.findOne({ _id, owner: req.user.id });
     if (!doc) return res.status(404).json({ error: 'Not found' });
@@ -1370,84 +1471,6 @@ app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Bad id' });
   }
 });
-
-// GET /reset-password → simple page to submit new password from emailed link
-app.get('/reset-password', (req, res) => {
-  res.type('html').send(`
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>Reset Password</title>
-        <style>
-          body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px;background:#fafafa}
-          .card{max-width:420px;margin:40px auto;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.06);padding:20px}
-          h2{margin:0 0 10px 0}
-          p{color:#555}
-          form{display:grid;gap:12px;margin-top:10px}
-          input,button{padding:12px;border-radius:10px;border:1px solid #ddd;font-size:16px}
-          button{border:none;background:#111;color:#fff;font-weight:700;cursor:pointer}
-          .msg{margin-top:10px;color:#d00}
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h2>Reset your password</h2>
-          <p>Enter a new password for your account.</p>
-          <form id="reset-form">
-            <input type="password" name="password" placeholder="New password" required />
-            <input type="password" name="confirm" placeholder="Confirm new password" required />
-            <button type="submit">Update Password</button>
-            <div class="msg" id="msg"></div>
-          </form>
-        </div>
-
-        <script>
-          const params = new URLSearchParams(location.search);
-          const token = params.get('token');
-          const email = params.get('email');
-          const msgEl = document.getElementById('msg');
-
-          if (!token || !email) {
-            msgEl.textContent = 'Invalid or incomplete reset link.';
-          }
-
-          document.getElementById('reset-form')?.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const fd = new FormData(e.currentTarget);
-            const password = fd.get('password');
-            const confirm = fd.get('confirm');
-            if (password !== confirm) {
-              msgEl.textContent = 'Passwords do not match.';
-              return;
-            }
-            msgEl.textContent = '';
-            try {
-              const res = await fetch('/reset-password', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, token, newPassword: password })
-              });
-              const data = await res.json().catch(() => ({}));
-              if (!res.ok) {
-                msgEl.textContent = data.error || 'Could not reset password.';
-                return;
-              }
-              alert('Password updated! You can now log in.');
-              // Redirect to your main page or login
-              location.href = '/';
-            } catch (err) {
-              console.error(err);
-              msgEl.textContent = 'Network error. Please try again.';
-            }
-          });
-        </script>
-      </body>
-    </html>
-  `);
-});
-
 
 /* ────────────────────────────────────────────────────────────
    Start server
