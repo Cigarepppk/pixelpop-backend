@@ -1147,7 +1147,7 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 async function createUserFromGoogle(name, email, googleId) {
   const base = (name || (email || '').split('@')[0] || 'user')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
+    .replace(/[^A-Za-z0-9._-]+/g, '')
     .slice(0, 20) || 'user';
 
   let candidate = base;
@@ -1255,12 +1255,14 @@ app.get('/i/:id', async (req, res) => {
 
     // Get file doc to set headers
     const filesCol = mongoose.connection.db.collection('photos.files');
-    const doc = await filesCol.findOne({ _: id });
+    const doc = await filesCol.findOne({ _id: id });
     if (!doc) return res.status(404).send('Not found');
 
     const type = doc.contentType || doc.metadata?.contentType || 'image/jpeg';
     res.set('Content-Type', type);
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    // allow drawing to canvas from other origins if needed
+    res.set('Access-Control-Allow-Origin', '*');
 
     const dl = gridfsBucket.openDownloadStream(id);
     dl.on('error', () => res.status(404).end('Not found'));
@@ -1281,6 +1283,7 @@ app.head('/i/:id', async (req, res) => {
     const type = doc.contentType || doc.metadata?.contentType || 'image/jpeg';
     res.set('Content-Type', type);
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.set('Access-Control-Allow-Origin', '*');
     return res.status(200).end();
   } catch {
     return res.status(400).end();
@@ -1299,7 +1302,7 @@ app.get('/d/:id', async (req, res) => {
 
     const type = doc.contentType || doc.metadata?.contentType || 'image/jpeg';
     const ext  = (type.split('/')[1] || 'jpg').toLowerCase();
-    const safeFilename = (doc.filename || `pixelpop-${id.toString()}.${ext}`).replace(/[^\w.\-]/g, '_');
+    const safeFilename = (doc.filename || `pixelpop-${id.toString()}.${ext}`).replace(/[^A-Za-z0-9._-]/g, '_');
 
     res.set('Content-Type', type);
     res.set('Content-Disposition', `attachment; filename="${safeFilename}"`);
@@ -1386,8 +1389,8 @@ app.post('/api/gallery', authMiddleware, async (req, res) => {
       contentType,
       metadata: { contentType, source: 'pixelpop-gallery', userId: req.user.id, createdAt: new Date() },
     });
-    uploadStream.end(buffer);
 
+    // attach listeners BEFORE ending stream to avoid race
     uploadStream.on('error', (err) => {
       console.error('GridFS upload error:', err);
       return res.status(500).json({ error: 'Upload failed' });
@@ -1420,6 +1423,8 @@ app.post('/api/gallery', authMiddleware, async (req, res) => {
         return res.status(500).json({ error: 'Could not save gallery item' });
       }
     });
+
+    uploadStream.end(Buffer.from(base64, 'base64'));
   } catch (e) {
     console.error('POST /api/gallery error:', e);
     return res.status(500).json({ error: 'Server error' });
