@@ -430,7 +430,9 @@ app.post('/auth/google', async (req, res) => {
   try {
     const { idToken } = req.body || {};
     if (!idToken) return res.status(400).json({ error: 'idToken is required.' });
-    if (!process.env.GOOGLE_CLIENT_ID) return res.status(500).json({ error: 'Server missing GOOGLE_CLIENT_ID' });
+   if (!process.env.GOOGLE_CLIENT_ID)
+  return res.status(500).json({ error: 'Server missing GOOGLE_CLIENT_ID' });
+
 
     const ticket = await googleClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
     const payload = ticket.getPayload();
