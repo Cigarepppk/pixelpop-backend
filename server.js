@@ -115,17 +115,24 @@ async function sendMail(to, subject, html) {
   // 1) SendGrid (Render free via HTTPS)
   if (process.env.SENDGRID_API_KEY) {
     const fromAddr = process.env.SENDGRID_FROM || process.env.MAIL_FROM || 'no-reply@pixelpop.local';
-    await sgMail.send({
-      to,
-      from: fromAddr,
-      subject,
-      html,
-      text: html ? String(html).replace(/<[^>]+>/g, '') : ''
-    });
-    return;
+    try {
+      await sgMail.send({
+        to,
+        from: fromAddr,
+        subject,
+        html,
+        text: html ? String(html).replace(/<[^>]+>/g, '') : ''
+      });
+      console.log('SendGrid: queued', { to, from: fromAddr, subject });
+      return;
+    } catch (e) {
+      const msg = e?.response?.body?.errors?.map(x => x.message).join('; ') || e?.message || String(e);
+      console.error('SendGrid send error:', msg);
+      throw new Error(msg);
+    }
   }
 
-  // 2) SMTP fallback (only for local or paid Render)
+  // 2) SMTP fallback (local / paid Render; free plan blocks SMTP ports)
   if (process.env.SMTP_HOST) {
     await mailer.sendMail({
       from: process.env.MAIL_FROM || 'PixelPop <no-reply@pixelpop>',
@@ -137,6 +144,15 @@ async function sendMail(to, subject, html) {
   console.warn('✉️  No email provider configured.');
 }
 
+app.post('/__sg_test', async (req, res) => {
+  try {
+    const to = (req.body && req.body.to) || 'phyopyaekhaing2006@gmail.com';
+    await sendMail(to, 'PixelPop test', '<strong>Hello from SendGrid</strong>');
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
 
 
 /* ────────────────────────────────────────────────────────────
