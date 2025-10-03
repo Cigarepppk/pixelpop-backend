@@ -70,6 +70,24 @@ function dlog(...args) {
   if (DEBUG_RESET) console.log(...args);
 }
 
+app.get('/__routes', (req, res) => {
+  const list = [];
+  function walk(stack, prefix='') {
+    stack.forEach((layer) => {
+      if (layer.route && layer.route.path) {
+        list.push({
+          path: prefix + layer.route.path,
+          methods: Object.keys(layer.route.methods || {})
+        });
+      } else if (layer.name === 'router' && layer.handle?.stack) {
+        walk(layer.handle.stack, prefix);
+      }
+    });
+  }
+  walk(app._router.stack);
+  res.json(list);
+});
+
 /* ────────────────────────────────────────────────────────────
    Mongo / Mongoose init
    ──────────────────────────────────────────────────────────── */
