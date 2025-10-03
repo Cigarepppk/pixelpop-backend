@@ -1,6 +1,5 @@
-
-
-require('dotenv').config(); // Loads: MONGODB_URI, MONGODB_DB, JWT_SECRET, PUBLIC_BASE_URL, PORT, CORS_ORIGINS, NODE_ENV, SMTP_*, MAIL_FROM, GOOGLE_CLIENT_ID, DEBUG_RESET
+// server.js
+require('dotenv').config(); // Loads: MONGODB_URI, MONGODB_DB, JWT_SECRET, PUBLIC_BASE_URL, PORT, CORS_ORIGINS, NODE_ENV, SMTP_*, MAIL_FROM, GOOGLE_CLIENT_ID, DEBUG_RESET, SENDGRID_*
 
 const express = require('express');
 const mongoose = require('mongoose');
@@ -10,14 +9,13 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const sgMail = require('@sendgrid/mail');
-if (process.env.SENDGRID_API_KEY) {
-  try { sgMail.setApiKey(process.env.SENDGRID_API_KEY); } catch (e) { console.error(e.message); }
-}
-
-
 const { OAuth2Client } = require('google-auth-library');
 const { v4: uuidv4 } = require('uuid');
 const { GridFSBucket, ObjectId } = require('mongodb');
+
+if (process.env.SENDGRID_API_KEY) {
+  try { sgMail.setApiKey(process.env.SENDGRID_API_KEY); } catch (e) { console.error(e.message); }
+}
 
 const app = express();
 
@@ -25,6 +23,7 @@ const app = express();
    Config
    ──────────────────────────────────────────────────────────── */
 const PORT = process.env.PORT || 5000;
+const DEBUG_RESET = String(process.env.DEBUG_RESET || '0') === '1';
 
 // Honor HTTPS behind proxies (Render/NGINX)
 app.set('trust proxy', true);
@@ -37,7 +36,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
 // CORS: allow your frontend + local dev (edit CORS_ORIGINS env if needed)
 const DEFAULT_ORIGINS = [
   'http://localhost:3000',
-  'https://pixelpop-server.onrender.com', // <- put your frontend origin here
+  'https://pixelpop-server.onrender.com',
 ];
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || DEFAULT_ORIGINS.join(','))
   .split(',')
@@ -54,6 +53,24 @@ const publicDir = path.join(__dirname, 'public');
 app.use(express.static(publicDir));
 
 /* ────────────────────────────────────────────────────────────
+   Helpers
+   ──────────────────────────────────────────────────────────── */
+function getBaseUrl(req) {
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL;
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const host = req.get('host');
+  return `${proto}://${host}`;
+}
+
+function normalizeEmail(e) {
+  return (e || '').trim().toLowerCase();
+}
+
+function dlog(...args) {
+  if (DEBUG_RESET) console.log(...args);
+}
+
+/* ────────────────────────────────────────────────────────────
    Mongo / Mongoose init
    ──────────────────────────────────────────────────────────── */
 if (!process.env.MONGODB_URI) {
@@ -63,7 +80,7 @@ if (!process.env.MONGODB_URI) {
 
 mongoose
   .connect(process.env.MONGODB_URI, {
-    dbName: process.env.MONGODB_DB || 'pixelpop', // ensure correct DB (not "test")
+    dbName: process.env.MONGODB_DB || 'pixelpop',
   })
   .then(() => console.log('✅ Connected to MongoDB'))
   .catch((err) => {
@@ -78,77 +95,51 @@ mongoose.connection.once('open', () => {
   console.log('✅ GridFS bucket "photos" ready');
 });
 
-// Build absolute base URL (prefer PUBLIC_BASE_URL in prod)
-function getBaseUrl(req) {
-  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL;
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
-  const host = req.get('host');
-  return `${proto}://${host}`;
-}
-
-// Normalize emails to avoid case-mismatch issues
-function normalizeEmail(e) {
-  return (e || '').trim().toLowerCase();
-}
-
 /* ────────────────────────────────────────────────────────────
-   Mailer (for forgot/reset password)
+   Mailer (SendGrid primary; SMTP fallback only if no SG)
    ──────────────────────────────────────────────────────────── */
 const mailer = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
   secure: String(process.env.SMTP_SECURE || 'false') === 'true',
-  auth: process.env.SMTP_USER && process.env.SMTP_PASS ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
+  auth: process.env.SMTP_USER && process.env.SMTP_PASS
+    ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    : undefined,
 });
-console.log("SENDING FROM:", process.env.SENDGRID_FROM);
 
 async function sendMail(to, subject, html) {
+  const text = html ? String(html).replace(/<[^>]+>/g, '') : '';
+
+  // Prefer SendGrid when available
   if (process.env.SENDGRID_API_KEY) {
     try {
-      await sgMail.send({
-        to,
-        from: { name: "PixelPop", email: "chncigarette@gmail.com" }, // VERIFIED
-        subject,
-        html,
-        text: html ? String(html).replace(/<[^>]+>/g, "") : ""
-      });
-      console.log("✅ Mail queued", { to, subject });
+      const from =
+        process.env.SENDGRID_FROM || // e.g. "PixelPop <chncigarette@gmail.com>"
+        { name: 'PixelPop', email: 'chncigarette@gmail.com' }; // verified sender fallback
+      await sgMail.send({ to, from, subject, html, text });
+      console.log('✅ SendGrid: queued', { to, subject });
       return;
     } catch (e) {
-      const msg =
-        e?.response?.body?.errors?.map(x => x.message).join("; ") ||
-        e?.message ||
-        String(e);
-      console.error("SendGrid send error:", msg);
+      const sgDetails = e?.response?.body?.errors?.map((x) => x.message).join('; ');
+      const msg = sgDetails || e?.message || String(e);
+      console.error('❌ SendGrid send error:', msg);
       throw new Error(msg);
     }
   }
 
-  // Fallback to SMTP only if SendGrid key missing
+  // SMTP fallback ONLY if no SG key
   if (process.env.SMTP_HOST) {
     await mailer.sendMail({
-      from: process.env.MAIL_FROM || 'PixelPop <no-reply@pixelpop>',
-      to, subject, html
+      from: process.env.MAIL_FROM || 'PixelPop <no-reply@pixelpop.local>',
+      to, subject, html, text,
     });
+    console.log('✅ SMTP: sent', { to, subject });
     return;
   }
 
   console.warn('✉️  No email provider configured.');
   throw new Error('No email provider configured.');
 }
-
-
-
-app.post('/__sg_test', async (req, res) => {
-  try {
-    const to = (req.body && req.body.to) || 'phyopyaekhaing2006@gmail.com';
-    await sendMail(to, 'PixelPop test', '<strong>Hello from SendGrid</strong>');
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
-});
-
 
 /* ────────────────────────────────────────────────────────────
    Models
@@ -157,11 +148,11 @@ const UserSchema = new mongoose.Schema({
   username: { type: String, unique: true, required: true },
   email:    { type: String, unique: true, required: true },
   password: { type: String, required: true },
-  // optional auth helpers
   googleId: { type: String, default: null },
   passwordResetToken: { type: String, default: null },
   passwordResetExpires: { type: Date, default: null },
 }, { timestamps: true });
+
 const User = mongoose.model('User', UserSchema);
 
 const GalleryItemSchema = new mongoose.Schema({
@@ -186,7 +177,7 @@ function authMiddleware(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Invalid token' });
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123'); // set JWT_SECRET in prod
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret123');
     req.user = decoded;
     next();
   } catch {
@@ -201,7 +192,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/', (_req, res) => res.send('Backend server is running!'));
 
 /* ────────────────────────────────────────────────────────────
-   Auth endpoints (signup / login) — supports email OR username login
+   Auth endpoints (signup / login)
    ──────────────────────────────────────────────────────────── */
 app.post('/signup', async (req, res) => {
   try {
@@ -252,7 +243,6 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Used by frontend to gate “Save to My Gallery”
 app.get('/api/auth/verify', authMiddleware, (req, res) => {
   res.json({ ok: true, user: req.user });
 });
@@ -260,39 +250,39 @@ app.get('/api/auth/verify', authMiddleware, (req, res) => {
 /* ────────────────────────────────────────────────────────────
    Forgot Password + Reset Password
    ──────────────────────────────────────────────────────────── */
-// TEMP: bypass DB and just send a reset email to confirm the route is fine
 app.post('/forgot-password', async (req, res) => {
   try {
-    console.log('[fp] start');
+    dlog('[forgot-password] start');
     const { email } = req.body || {};
     if (!email) {
-      console.log('[fp] missing email');
+      dlog('[forgot-password] missing email');
       return res.status(400).json({ error: 'Email is required.' });
     }
 
     const normalizedEmail = normalizeEmail(email);
-    console.log('[fp] normalizedEmail:', normalizedEmail);
+    dlog('[forgot-password] normalizedEmail:', normalizedEmail);
 
     const user = await User.findOne({ email: normalizedEmail });
-    console.log('[fp] user found?', !!user);
-    // Always return 200 to prevent enumeration
+    dlog('[forgot-password] user found?', !!user);
+
+    // Always return 200 to prevent user enumeration
     if (!user) {
-      console.log('[fp] no user; returning 200');
+      dlog('[forgot-password] no user; returning 200');
       return res.json({ message: 'If that account exists, an email was sent.' });
     }
 
     const token = uuidv4();
-    const expires = new Date(Date.now() + 1000 * 60 * 30);
-    console.log('[fp] token:', token, 'exp:', expires.toISOString());
+    const expires = new Date(Date.now() + 1000 * 60 * 30); // 30 min
+    dlog('[forgot-password] token:', token, 'exp:', expires.toISOString());
 
     user.passwordResetToken = token;
     user.passwordResetExpires = expires;
     await user.save();
-    console.log('[fp] user saved with token');
+    dlog('[forgot-password] user saved with token');
 
     const base = process.env.PUBLIC_BASE_URL || getBaseUrl(req);
     const link = `${base}/reset-password?token=${encodeURIComponent(token)}&email=${encodeURIComponent(normalizedEmail)}`;
-    console.log('[fp] link:', link);
+    dlog('[forgot-password] link:', link);
 
     try {
       await sendMail(
@@ -302,20 +292,19 @@ app.post('/forgot-password', async (req, res) => {
          <p><a href="${link}">Click here to reset</a> (valid for 30 minutes).</p>
          <p>If you didn’t request this, you can ignore this email.</p>`
       );
-      console.log('[fp] email queued');
+      dlog('[forgot-password] email queued');
     } catch (mailErr) {
-      // We still return 200 to avoid user enumeration; just log the error.
-      console.error('[fp] sendMail failed:', mailErr);
+      // Still return 200 to avoid enumeration; just log the error.
+      console.error('[forgot-password] sendMail failed:', mailErr);
     }
 
-    console.log('[fp] done; returning 200');
+    dlog('[forgot-password] done; returning 200');
     return res.json({ message: 'If that account exists, an email was sent.' });
   } catch (err) {
-    console.error('[fp] fatal error:', err);
+    console.error('[forgot-password] fatal error:', err);
     return res.status(500).json({ error: 'Could not process request.' });
   }
 });
-
 
 app.post('/reset-password', async (req, res) => {
   try {
@@ -326,7 +315,7 @@ app.post('/reset-password', async (req, res) => {
 
     const normalizedEmail = normalizeEmail(email);
 
-    if (process.env.DEBUG_RESET === '1') {
+    if (DEBUG_RESET) {
       console.log('[reset-password] email=%s token=%s', normalizedEmail, token);
     }
 
@@ -337,7 +326,7 @@ app.post('/reset-password', async (req, res) => {
     });
 
     if (!user) {
-      if (process.env.DEBUG_RESET === '1') {
+      if (DEBUG_RESET) {
         const anyByToken = await User.findOne({ passwordResetToken: token });
         console.log('[reset-password] lookup failed. anyByToken?', !!anyByToken);
       }
@@ -434,7 +423,7 @@ app.get('/reset-password', (req, res) => {
 });
 
 /* ────────────────────────────────────────────────────────────
-   Google Sign‑In → verify ID token, upsert user, return our JWT
+   Google Sign-In → verify ID token, upsert user, return our JWT
    ──────────────────────────────────────────────────────────── */
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -456,15 +445,12 @@ async function createUserFromGoogle(name, email, googleId) {
   return User.create({ username: candidate, email: normalizedEmail, password: placeholder, googleId });
 }
 
-
-// POST /auth/google  { idToken }
 app.post('/auth/google', async (req, res) => {
   try {
     const { idToken } = req.body || {};
     if (!idToken) return res.status(400).json({ error: 'idToken is required.' });
-   if (!process.env.GOOGLE_CLIENT_ID)
-  return res.status(500).json({ error: 'Server missing GOOGLE_CLIENT_ID' });
-
+    if (!process.env.GOOGLE_CLIENT_ID)
+      return res.status(500).json({ error: 'Server missing GOOGLE_CLIENT_ID' });
 
     const ticket = await googleClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
     const payload = ticket.getPayload();
@@ -496,9 +482,6 @@ app.post('/auth/google', async (req, res) => {
 /* ────────────────────────────────────────────────────────────
    Image Uploads via GridFS (QR upload endpoint used by frontend)
    ──────────────────────────────────────────────────────────── */
-// POST /api/upload
-// Body: { imageData: "data:image/jpeg;base64,...", fileName?: "name.jpg" }
-// Returns: { success, url, downloadUrl, viewerUrl, id, contentType }
 app.post('/api/upload', async (req, res) => {
   try {
     if (!gridfsBucket) return res.status(503).json({ error: 'Storage not ready' });
@@ -508,7 +491,6 @@ app.post('/api/upload', async (req, res) => {
       return res.status(400).json({ error: 'imageData must be a data URL string' });
     }
 
-    // Parse "data:image/jpeg;base64,...."
     const [meta, base64] = imageData.split(',');
     const m = /^data:(.*?);base64$/i.exec(meta);
     const contentType = (m && m[1]) || 'image/jpeg';
@@ -531,9 +513,9 @@ app.post('/api/upload', async (req, res) => {
     uploadStream.on('finish', () => {
       const id = uploadStream.id.toString();
       const base = getBaseUrl(req);
-      const url         = `${base}/i/${id}`; // raw image
-      const downloadUrl = `${base}/d/${id}`; // force download
-      const viewerUrl   = `${base}/v/${id}`; // landing page with big Download button
+      const url         = `${base}/i/${id}`;
+      const downloadUrl = `${base}/d/${id}`;
+      const viewerUrl   = `${base}/v/${id}`;
       return res.json({ success: true, url, downloadUrl, viewerUrl, id, contentType });
     });
 
@@ -550,7 +532,6 @@ app.get('/i/:id', async (req, res) => {
     if (!gridfsBucket) return res.status(503).send('Storage not ready');
     const id = new ObjectId(req.params.id);
 
-    // Get file doc to set headers
     const filesCol = mongoose.connection.db.collection('photos.files');
     const doc = await filesCol.findOne({ _id: id });
     if (!doc) return res.status(404).send('Not found');
@@ -558,7 +539,6 @@ app.get('/i/:id', async (req, res) => {
     const type = doc.contentType || doc.metadata?.contentType || 'image/jpeg';
     res.set('Content-Type', type);
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
-    // allow drawing to canvas from other origins if needed
     res.set('Access-Control-Allow-Origin', '*');
 
     const dl = gridfsBucket.openDownloadStream(id);
@@ -569,7 +549,7 @@ app.get('/i/:id', async (req, res) => {
   }
 });
 
-// HEAD /i/:id → quick reachability check (for frontend verification)
+// HEAD /i/:id → quick reachability check
 app.head('/i/:id', async (req, res) => {
   try {
     if (!gridfsBucket) return res.status(503).end();
@@ -657,12 +637,8 @@ app.get('/v/:id', async (req, res) => {
 });
 
 /* ────────────────────────────────────────────────────────────
-   Gallery API — matches frontend expectations
+   Gallery API
    ──────────────────────────────────────────────────────────── */
-
-// POST /api/gallery
-// Body: { imageData, visibility?: 'private'|'public', fileName? }
-// Returns: { item: { id, url, createdAt } }
 app.post('/api/gallery', authMiddleware, async (req, res) => {
   try {
     if (!gridfsBucket) return res.status(503).json({ error: 'Storage not ready' });
@@ -672,7 +648,6 @@ app.post('/api/gallery', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'imageData must be a data URL string' });
     }
 
-    // Parse data URL
     const [meta, base64] = imageData.split(',');
     const m = /^data:(.*?);base64$/i.exec(meta);
     const contentType = (m && m[1]) || 'image/jpeg';
@@ -681,13 +656,11 @@ app.post('/api/gallery', authMiddleware, async (req, res) => {
       return res.status(413).json({ error: 'Image too large (max 15MB)' });
     }
 
-    // Save to GridFS
     const uploadStream = gridfsBucket.openUploadStream(fileName, {
       contentType,
       metadata: { contentType, source: 'pixelpop-gallery', userId: req.user.id, createdAt: new Date() },
     });
 
-    // attach listeners BEFORE ending stream to avoid race
     uploadStream.on('error', (err) => {
       console.error('GridFS upload error:', err);
       return res.status(500).json({ error: 'Upload failed' });
@@ -728,8 +701,6 @@ app.post('/api/gallery', authMiddleware, async (req, res) => {
   }
 });
 
-// GET /api/gallery/mine
-// Returns: { items: [{ id, url, createdAt }] }
 app.get('/api/gallery/mine', authMiddleware, async (req, res) => {
   try {
     const docs = await GalleryItem
@@ -750,8 +721,6 @@ app.get('/api/gallery/mine', authMiddleware, async (req, res) => {
   }
 });
 
-// DELETE /api/gallery/:id
-// Returns 200 + { ok:true } on success
 app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
   try {
     if (!gridfsBucket) return res.status(503).json({ error: 'Storage not ready' });
@@ -759,7 +728,6 @@ app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
     const doc = await GalleryItem.findOne({ _id, owner: req.user.id });
     if (!doc) return res.status(404).json({ error: 'Not found' });
 
-    // Remove file from GridFS (ignore if already gone)
     try {
       await gridfsBucket.delete(doc.fileId);
     } catch (e) {
@@ -773,7 +741,20 @@ app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Bad id' });
   }
 });
-// TEMP: diagnostics (remove after fixing)
+
+/* ────────────────────────────────────────────────────────────
+   Diagnostics (remove after fixing)
+   ──────────────────────────────────────────────────────────── */
+app.post('/__sg_test', async (req, res) => {
+  try {
+    const to = (req.body && req.body.to) || 'phyopyaekhaing2006@gmail.com';
+    await sendMail(to, 'PixelPop test', '<strong>Hello from SendGrid</strong>');
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 app.get('/__sg_diag', (_req, res) => {
   const fromEnv = process.env.SENDGRID_FROM || process.env.MAIL_FROM || null;
   const hasKey = Boolean(process.env.SENDGRID_API_KEY && process.env.SENDGRID_API_KEY.length > 10);
@@ -783,7 +764,6 @@ app.get('/__sg_diag', (_req, res) => {
     nodeEnv: process.env.NODE_ENV || null,
   });
 });
-console.log("DEBUG FROM:", process.env.SENDGRID_FROM);
 
 /* ────────────────────────────────────────────────────────────
    Start server
