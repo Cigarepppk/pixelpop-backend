@@ -127,6 +127,7 @@ const mailer = nodemailer.createTransport({
 
 async function sendMail(to, subject, html) {
   const text = html ? String(html).replace(/<[^>]+>/g, '') : '';
+
   if (process.env.SENDGRID_API_KEY) {
     try {
       const from = process.env.SENDGRID_FROM || { name: 'PixelPop', email: 'chncigarette@gmail.com' };
@@ -134,7 +135,7 @@ async function sendMail(to, subject, html) {
       console.log('✅ SG accepted', {
         to, subject,
         status: resp?.statusCode,
-        messageId: resp?.headers?.['x-message-id'] || resp?.headers?.['x-message-id'.toLowerCase()]
+        messageId: resp?.headers?.['x-message-id']
       });
       return;
     } catch (e) {
@@ -143,24 +144,20 @@ async function sendMail(to, subject, html) {
       throw new Error(msg);
     }
   }
-  // fallback SMTP only if no SG key
 
-}
-
-
-  // SMTP fallback ONLY if no SG key
+  // Fallback ONLY if no SendGrid key
   if (process.env.SMTP_HOST) {
     await mailer.sendMail({
       from: process.env.MAIL_FROM || 'PixelPop <no-reply@pixelpop.local>',
       to, subject, html, text,
     });
-    console.log('✅ SMTP: sent', { to, subject });
+    console.log('✅ SMTP sent', { to, subject });
     return;
   }
 
   console.warn('✉️  No email provider configured.');
   throw new Error('No email provider configured.');
-
+}
 
 /* ────────────────────────────────────────────────────────────
    Models
