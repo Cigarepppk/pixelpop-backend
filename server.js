@@ -100,39 +100,31 @@ const mailer = nodemailer.createTransport({
   secure: String(process.env.SMTP_SECURE || 'false') === 'true',
   auth: process.env.SMTP_USER && process.env.SMTP_PASS ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } : undefined,
 });
+console.log("SENDING FROM:", process.env.SENDGRID_FROM);
 
-/*async function sendMail(to, subject, html) {
-  if (!process.env.SMTP_HOST) {
-    console.warn('✉️  SMTP not configured. Skipping real email send. (Set SMTP_* env vars)');
-    return; // noop for local dev
-  }
-  await mailer.sendMail({
-    from: process.env.MAIL_FROM || 'PixelPop <no-reply@pixelpop>',
-    to, subject, html,
-  });
-}*/
 async function sendMail(to, subject, html) {
-  // 1) SendGrid (Render free via HTTPS)
   if (process.env.SENDGRID_API_KEY) {
-    const fromAddr = process.env.SENDGRID_FROM || process.env.MAIL_FROM || 'no-reply@pixelpop.local';
     try {
       await sgMail.send({
         to,
-        from: fromAddr,
+        from: { name: "PixelPop", email: "chncigarette@gmail.com" }, // VERIFIED
         subject,
         html,
-        text: html ? String(html).replace(/<[^>]+>/g, '') : ''
+        text: html ? String(html).replace(/<[^>]+>/g, "") : ""
       });
-      console.log('SendGrid: queued', { to, from: fromAddr, subject });
+      console.log("✅ Mail queued", { to, subject });
       return;
     } catch (e) {
-      const msg = e?.response?.body?.errors?.map(x => x.message).join('; ') || e?.message || String(e);
-      console.error('SendGrid send error:', msg);
+      const msg =
+        e?.response?.body?.errors?.map(x => x.message).join("; ") ||
+        e?.message ||
+        String(e);
+      console.error("SendGrid send error:", msg);
       throw new Error(msg);
     }
   }
 
-  // 2) SMTP fallback (local / paid Render; free plan blocks SMTP ports)
+  // Fallback to SMTP only if SendGrid key missing
   if (process.env.SMTP_HOST) {
     await mailer.sendMail({
       from: process.env.MAIL_FROM || 'PixelPop <no-reply@pixelpop>',
@@ -142,7 +134,10 @@ async function sendMail(to, subject, html) {
   }
 
   console.warn('✉️  No email provider configured.');
+  throw new Error('No email provider configured.');
 }
+
+
 
 app.post('/__sg_test', async (req, res) => {
   try {
@@ -265,42 +260,62 @@ app.get('/api/auth/verify', authMiddleware, (req, res) => {
 /* ────────────────────────────────────────────────────────────
    Forgot Password + Reset Password
    ──────────────────────────────────────────────────────────── */
+// TEMP: bypass DB and just send a reset email to confirm the route is fine
 app.post('/forgot-password', async (req, res) => {
   try {
+    console.log('[fp] start');
     const { email } = req.body || {};
-    if (!email) return res.status(400).json({ error: 'Email is required.' });
+    if (!email) {
+      console.log('[fp] missing email');
+      return res.status(400).json({ error: 'Email is required.' });
+    }
 
     const normalizedEmail = normalizeEmail(email);
+    console.log('[fp] normalizedEmail:', normalizedEmail);
+
     const user = await User.findOne({ email: normalizedEmail });
-    // Always return 200 to prevent user enumeration
-    if (!user) return res.json({ message: 'If that account exists, an email was sent.' });
+    console.log('[fp] user found?', !!user);
+    // Always return 200 to prevent enumeration
+    if (!user) {
+      console.log('[fp] no user; returning 200');
+      return res.json({ message: 'If that account exists, an email was sent.' });
+    }
 
     const token = uuidv4();
-    const expires = new Date(Date.now() + 1000 * 60 * 30); // 30 min
+    const expires = new Date(Date.now() + 1000 * 60 * 30);
+    console.log('[fp] token:', token, 'exp:', expires.toISOString());
 
     user.passwordResetToken = token;
     user.passwordResetExpires = expires;
     await user.save();
-
-    if (process.env.DEBUG_RESET === '1') {
-      console.log('[forgot-password] email=%s token=%s exp=%s', normalizedEmail, token, expires.toISOString());
-    }
+    console.log('[fp] user saved with token');
 
     const base = process.env.PUBLIC_BASE_URL || getBaseUrl(req);
     const link = `${base}/reset-password?token=${encodeURIComponent(token)}&email=${encodeURIComponent(normalizedEmail)}`;
+    console.log('[fp] link:', link);
 
-    await sendMail(normalizedEmail, 'Reset your PixelPop password', `
-      <p>We received a request to reset your password.</p>
-      <p><a href="${link}">Click here to reset</a> (valid for 30 minutes).</p>
-      <p>If you didn’t request this, you can ignore this email.</p>
-    `);
+    try {
+      await sendMail(
+        normalizedEmail,
+        'Reset your PixelPop password',
+        `<p>We received a request to reset your password.</p>
+         <p><a href="${link}">Click here to reset</a> (valid for 30 minutes).</p>
+         <p>If you didn’t request this, you can ignore this email.</p>`
+      );
+      console.log('[fp] email queued');
+    } catch (mailErr) {
+      // We still return 200 to avoid user enumeration; just log the error.
+      console.error('[fp] sendMail failed:', mailErr);
+    }
 
-    res.json({ message: 'If that account exists, an email was sent.' });
+    console.log('[fp] done; returning 200');
+    return res.json({ message: 'If that account exists, an email was sent.' });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Could not process request.' });
+    console.error('[fp] fatal error:', err);
+    return res.status(500).json({ error: 'Could not process request.' });
   }
 });
+
 
 app.post('/reset-password', async (req, res) => {
   try {
@@ -440,6 +455,7 @@ async function createUserFromGoogle(name, email, googleId) {
   const placeholder = await bcrypt.hash(uuidv4(), 10);
   return User.create({ username: candidate, email: normalizedEmail, password: placeholder, googleId });
 }
+
 
 // POST /auth/google  { idToken }
 app.post('/auth/google', async (req, res) => {
@@ -757,6 +773,17 @@ app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
     return res.status(400).json({ error: 'Bad id' });
   }
 });
+// TEMP: diagnostics (remove after fixing)
+app.get('/__sg_diag', (_req, res) => {
+  const fromEnv = process.env.SENDGRID_FROM || process.env.MAIL_FROM || null;
+  const hasKey = Boolean(process.env.SENDGRID_API_KEY && process.env.SENDGRID_API_KEY.length > 10);
+  res.json({
+    fromEnv,
+    hasApiKey: hasKey,
+    nodeEnv: process.env.NODE_ENV || null,
+  });
+});
+console.log("DEBUG FROM:", process.env.SENDGRID_FROM);
 
 /* ────────────────────────────────────────────────────────────
    Start server
