@@ -70,23 +70,7 @@ function dlog(...args) {
   if (DEBUG_RESET) console.log(...args);
 }
 
-app.get('/__routes', (req, res) => {
-  const list = [];
-  function walk(stack, prefix='') {
-    stack.forEach((layer) => {
-      if (layer.route && layer.route.path) {
-        list.push({
-          path: prefix + layer.route.path,
-          methods: Object.keys(layer.route.methods || {})
-        });
-      } else if (layer.name === 'router' && layer.handle?.stack) {
-        walk(layer.handle.stack, prefix);
-      }
-    });
-  }
-  walk(app._router.stack);
-  res.json(list);
-});
+app.get('/__routes', (req, res) => {});
 
 /* ────────────────────────────────────────────────────────────
    Mongo / Mongoose init
@@ -263,9 +247,6 @@ app.get('/api/auth/verify', authMiddleware, (req, res) => {
   res.json({ ok: true, user: req.user });
 });
 app.post('/__db_has_user', async (req, res) => {
-  const email = (req.body?.email || '').trim().toLowerCase();
-  const user = await User.findOne({ email });
-  res.json({ exists: !!user });
 });
 
 /* ────────────────────────────────────────────────────────────
@@ -766,25 +747,9 @@ app.delete('/api/gallery/:id', authMiddleware, async (req, res) => {
 /* ────────────────────────────────────────────────────────────
    Diagnostics (remove after fixing)
    ──────────────────────────────────────────────────────────── */
-app.post('/__sg_test', async (req, res) => {
-  try {
-    const to = (req.body && req.body.to) || 'phyopyaekhaing2006@gmail.com';
-    await sendMail(to, 'PixelPop test', '<strong>Hello from SendGrid</strong>');
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
-});
+app.post('/__sg_test', async (req, res) => {});
 
-app.get('/__sg_diag', (_req, res) => {
-  const fromEnv = process.env.SENDGRID_FROM || process.env.MAIL_FROM || null;
-  const hasKey = Boolean(process.env.SENDGRID_API_KEY && process.env.SENDGRID_API_KEY.length > 10);
-  res.json({
-    fromEnv,
-    hasApiKey: hasKey,
-    nodeEnv: process.env.NODE_ENV || null,
-  });
-});
+app.get('/__sg_diag', (_req, res) => {});
 
 /* ────────────────────────────────────────────────────────────
    Start server
